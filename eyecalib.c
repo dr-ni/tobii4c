@@ -22,16 +22,48 @@ gcc eyecalib.c -o eyecalib \
 #include <tobii/tobii.h>
 #include <tobii/tobii_streams.h>
 
+/*
+    tobii_calibration.h not available on this system
+    tobii_enabled_eye_t is already defined in tobii.h
+    functions are present in libtobii_stream_engine.so
+*/
+
+extern tobii_error_t tobii_calibration_start(
+    tobii_device_t* device,
+    tobii_enabled_eye_t enabled_eye);
+
+extern tobii_error_t tobii_calibration_stop(
+    tobii_device_t* device);
+
+extern tobii_error_t tobii_calibration_collect_data_2d(
+    tobii_device_t* device,
+    float x,
+    float y);
+
+extern tobii_error_t tobii_calibration_compute_and_apply(
+    tobii_device_t* device);
+
+typedef void (*tobii_calibration_data_fn)(
+    const void* data,
+    size_t size,
+    void* user_data);
+
+extern tobii_error_t tobii_calibration_retrieve(
+    tobii_device_t* device,
+    tobii_calibration_data_fn callback,
+    void* user_data);
+
 #define POINTS 9
-#define SAMPLE_COUNT 250
+#define SAMPLE_COUNT 50
+#define LOOP_LIMIT 2000
 
 #define TARGET_OUTER 22
 #define TARGET_MIDDLE 20
 #define TARGET_INNER 6
 #define TARGET_CROSS 36
 
-#define MAX_RETRIES 3
-#define MIN_VALID_SAMPLES 80
+#define MAX_RETRIES 5
+#define MIN_VALID_SAMPLES 20
 
 static int debug = 0;
 static int debug_gaze = 0;
@@ -130,30 +162,20 @@ void gaze_cb(
         return;
     }
 
-    if(g->position_xy[0] < 0.0f ||
-       g->position_xy[0] > 1.0f ||
-       g->position_xy[1] < 0.0f ||
-       g->position_xy[1] > 1.0f)
+    float rx = g->position_xy[0] + cfg.sensor_offset_x;
+    float ry = g->position_xy[1] + cfg.sensor_offset_y;
+
+    if(rx < 0.0f || rx > 1.0f ||
+       ry < 0.0f || ry > 1.0f)
     {
-        DBGGAZE("out of range: (%.4f,%.4f)\n",
-            g->position_xy[0],
-            g->position_xy[1]);
-        return;
+        DBGGAZE("out of range: (%.4f,%.4f) - accepted unclamped\n",
+            rx, ry);
     }
 
-    gx =
-        g->position_xy[0] +
-        cfg.sensor_offset_x;
+    gx = rx;
+    gy = ry;
 
-    gy =
-        g->position_xy[1] +
-        cfg.sensor_offset_y;
-
-    DBGGAZE("raw=(%.4f,%.4f) offset=(%.4f,%.4f)\n",
-        g->position_xy[0],
-        g->position_xy[1],
-        gx,
-        gy);
+    DBGGAZE("raw=(%.4f,%.4f)\n", gx, gy);
 
     valid = 1;
 }
@@ -192,8 +214,8 @@ int import_tobii_db()
 
     while(fgets(line,sizeof(line),f))
     {
-        if(!(strstr(line,"\"name\":\"NucBox\"") ||
-             strstr(line,"\"name\":\"uwe1\"")))
+        if(!(strstr(line,"\"IS4_Large_Peripheral\"") &&
+             strstr(line,"\"readonly\":false")))
         {
             continue;
         }
@@ -532,6 +554,194 @@ void draw_target(
     XFlush(d);
 }
 
+/*
+    native Tobii 4C calibration via tobii_calibration_* API
+
+    attempts to run native calibration before the mesh calibration
+    so the tracker delivers normalized [0..1] gaze coordinates.
+
+    on tobii-ttp:// devices (Professional series) calibration_start
+    may return TOBII_ERROR_NOT_SUPPORTED (2) because calibration is
+    managed by the tobii engine service. in that case we check if
+    a calibration already exists via tobii_calibration_retrieve.
+*/
+
+static void calib_data_cb(
+    const void* data,
+    size_t size,
+    void* user_data)
+{
+    (void)data;
+    int* found = (int*)user_data;
+    *found = (size > 0) ? 1 : 0;
+
+    printf(
+        "Existing calibration found: %zu bytes\n",
+        size);
+
+    DBG("calib_data_cb: size=%zu\n", size);
+}
+
+int run_tobii_calibration(
+    tobii_device_t* dev,
+    Display* d,
+    Window win,
+    GC gc,
+    Colormap cmap,
+    int W,
+    int H)
+{
+    tobii_error_t err;
+
+    printf(
+        "\n--- Native Tobii calibration ---\n");
+
+    DBG("run_tobii_calibration: start\n");
+
+    err = tobii_calibration_start(dev, TOBII_ENABLED_EYE_BOTH);
+
+    if(err != TOBII_ERROR_NO_ERROR)
+    {
+        fprintf(
+            stderr,
+            "tobii_calibration_start: err=%d"
+            " (may not be supported on this device)\n",
+            err);
+
+        /*
+            check if a calibration already exists
+        */
+
+        int found = 0;
+
+        tobii_error_t rerr =
+            tobii_calibration_retrieve(
+                dev,
+                calib_data_cb,
+                &found);
+
+        DBG("tobii_calibration_retrieve: err=%d found=%d\n",
+            rerr, found);
+
+        if(rerr == TOBII_ERROR_NO_ERROR && found)
+        {
+            printf(
+                "Using existing device calibration\n\n");
+
+            return 1;
+        }
+
+        fprintf(
+            stderr,
+            "No existing calibration found.\n"
+            "Please calibrate using Tobii Pro Eye Tracker Manager\n"
+            "or tobii_engine service before running eyecalib.\n\n");
+
+        return 0;
+    }
+
+    DBG("tobii_calibration_start ok\n");
+
+    /*
+        9 calibration points matching the mesh targets
+    */
+
+    float pts[9][2] =
+    {
+        {0.05f,0.05f},
+        {0.50f,0.05f},
+        {0.95f,0.05f},
+
+        {0.05f,0.50f},
+        {0.50f,0.50f},
+        {0.95f,0.50f},
+
+        {0.05f,0.95f},
+        {0.50f,0.95f},
+        {0.95f,0.95f}
+    };
+
+    for(int i = 0; i < 9; i++)
+    {
+        float tx = pts[i][0];
+        float ty = pts[i][1];
+
+        int px = tx * W;
+        int py = ty * H;
+
+        if(d)
+            draw_target(d, win, gc, cmap, px, py, 0);
+
+        printf(
+            "Native CAL %d/9 : %.2f %.2f\n",
+            i+1, tx, ty);
+
+        DBG("native cal point %d: (%.4f,%.4f)\n", i+1, tx, ty);
+
+        sleep(2);
+
+        err = tobii_calibration_collect_data_2d(dev, tx, ty);
+
+        if(err != TOBII_ERROR_NO_ERROR)
+        {
+            fprintf(
+                stderr,
+                "tobii_calibration_collect_data_2d failed "
+                "point %d: %d\n",
+                i+1, err);
+
+            sleep(1);
+
+            err = tobii_calibration_collect_data_2d(dev, tx, ty);
+
+            if(err != TOBII_ERROR_NO_ERROR)
+            {
+                fprintf(
+                    stderr,
+                    "retry failed point %d: %d\n",
+                    i+1, err);
+            }
+        }
+
+        DBG("native cal point %d collected err=%d\n", i+1, err);
+
+        if(d)
+            draw_target(d, win, gc, cmap, px, py, 1);
+
+        usleep(350000);
+    }
+
+    printf(
+        "Computing native calibration...\n");
+
+    DBG("tobii_calibration_compute_and_apply: start\n");
+
+    err = tobii_calibration_compute_and_apply(dev);
+
+    if(err != TOBII_ERROR_NO_ERROR)
+    {
+        fprintf(
+            stderr,
+            "tobii_calibration_compute_and_apply failed: %d\n",
+            err);
+
+        tobii_calibration_stop(dev);
+
+        return 0;
+    }
+
+    DBG("tobii_calibration_compute_and_apply ok\n");
+
+    err = tobii_calibration_stop(dev);
+
+    DBG("tobii_calibration_stop err=%d\n", err);
+
+    printf(
+        "Native Tobii calibration complete\n\n");
+
+    return 1;
+}
+
 int main(int argc, char** argv)
 {
     for(int i=1;i<argc;i++)
@@ -601,6 +811,86 @@ int main(int argc, char** argv)
     Window root =
         RootWindow(d,screen);
 
+    float targets[9][2] =
+    {
+        {0.05f,0.05f},
+        {0.50f,0.05f},
+        {0.95f,0.05f},
+
+        {0.05f,0.50f},
+        {0.50f,0.50f},
+        {0.95f,0.50f},
+
+        {0.05f,0.95f},
+        {0.50f,0.95f},
+        {0.95f,0.95f}
+    };
+
+    /*
+        init Tobii before creating fullscreen window
+        so native calibration can run without being covered
+    */
+
+    tobii_api_t* api;
+    tobii_device_t* dev;
+
+    char url[256]={0};
+
+    if(tobii_api_create(
+        &api,
+        NULL,
+        NULL) != TOBII_ERROR_NO_ERROR)
+    {
+        fprintf(stderr, "tobii_api_create failed\n");
+        return 1;
+    }
+
+    DBG("tobii_api_create ok\n");
+
+    tobii_enumerate_local_device_urls(
+        api,
+        url_cb,
+        url);
+
+    if(strlen(url)==0)
+    {
+        fprintf(stderr, "No Tobii device found\n");
+        return 1;
+    }
+
+    printf(
+        "Using device: %s\n",
+        url);
+
+    DBG("tobii device url: %s\n", url);
+
+    if(tobii_device_create(
+        api,
+        url,
+        &dev) != TOBII_ERROR_NO_ERROR)
+    {
+        fprintf(stderr, "tobii_device_create failed\n");
+        return 1;
+    }
+
+    DBG("tobii_device_create ok\n");
+
+    /*
+        run native Tobii calibration before fullscreen window
+        so the desktop is visible during native calibration
+    */
+
+    if(!run_tobii_calibration(dev, NULL, None, None, None, W, H))
+    {
+        fprintf(
+            stderr,
+            "Native calibration failed, continuing with mesh calibration only\n");
+    }
+
+    /*
+        now create fullscreen window for mesh calibration
+    */
+
     XSetWindowAttributes attr;
 
     attr.override_redirect = True;
@@ -656,71 +946,125 @@ int main(int argc, char** argv)
     Colormap cmap =
         DefaultColormap(d,screen);
 
-    float targets[9][2] =
-    {
-        {0.05f,0.05f},
-        {0.50f,0.05f},
-        {0.95f,0.05f},
-
-        {0.05f,0.50f},
-        {0.50f,0.50f},
-        {0.95f,0.50f},
-
-        {0.05f,0.95f},
-        {0.50f,0.95f},
-        {0.95f,0.95f}
-    };
-
-    tobii_api_t* api;
-    tobii_device_t* dev;
-
-    char url[256]={0};
-
-    if(tobii_api_create(
-        &api,
-        NULL,
-        NULL) != TOBII_ERROR_NO_ERROR)
-    {
-        fprintf(stderr, "tobii_api_create failed\n");
-        return 1;
-    }
-
-    DBG("tobii_api_create ok\n");
-
-    tobii_enumerate_local_device_urls(
-        api,
-        url_cb,
-        url);
-
-    if(strlen(url)==0)
-    {
-        fprintf(stderr, "No Tobii device found\n");
-        return 1;
-    }
-
-    printf(
-        "Using device: %s\n",
-        url);
-
-    DBG("tobii device url: %s\n", url);
-
-    if(tobii_device_create(
-        api,
-        url,
-        &dev) != TOBII_ERROR_NO_ERROR)
-    {
-        fprintf(stderr, "tobii_device_create failed\n");
-        return 1;
-    }
-
-    DBG("tobii_device_create ok\n");
-
     tobii_gaze_point_subscribe(
         dev,
         gaze_cb,
         NULL);
 
     DBG("tobii_gaze_point_subscribe ok\n");
+
+    /*
+        quick stream test - check if tracker delivers any data
+    */
+
+    printf("Testing gaze stream...\n");
+
+    {
+        int test_loops = 0;
+        int test_valid = 0;
+
+        while(test_loops < 200 && test_valid < 3)
+        {
+            valid = 0;
+
+            tobii_wait_for_callbacks(1, &dev);
+            tobii_device_process_callbacks(dev);
+
+            if(valid)
+                test_valid++;
+
+            test_loops++;
+            usleep(5000);
+        }
+
+        if(test_valid == 0)
+        {
+            fprintf(
+                stderr,
+                "No gaze data from tracker after stream test.\n"
+                "Check: tracker powered, USB connected, tobii_engine running.\n"
+                "Run: systemctl status tobii_engine\n");
+
+            return 1;
+        }
+
+        printf("Gaze stream ok (%d samples in %d loops)\n",
+            test_valid, test_loops);
+
+        DBG("stream test: valid=%d loops=%d\n", test_valid, test_loops);
+    }
+
+    /*
+        estimate sensor offset from warmup samples
+        to compensate for non-standard tracker mounting
+    */
+
+    printf(
+        "Estimating sensor offset...\n"
+        "Please look at the CENTER of the screen.\n");
+
+    sleep(1);
+
+    {
+        float sum_x = 0.0f;
+        float sum_y = 0.0f;
+        int   n     = 0;
+        int   loops = 0;
+
+        while(n < 60 && loops < 1500)
+        {
+            valid = 0;
+
+            tobii_wait_for_callbacks(1, &dev);
+            tobii_device_process_callbacks(dev);
+
+            if(valid)
+            {
+                sum_x += gx;
+                sum_y += gy;
+                n++;
+            }
+
+            loops++;
+            usleep(2000);
+        }
+
+        if(n > 10)
+        {
+            float mean_x = sum_x / n;
+            float mean_y = sum_y / n;
+
+            /*
+                center of screen should be (0.5, 0.5)
+                derive offset to shift mean to center
+            */
+
+            float ox = 0.5f - mean_x;
+            float oy = 0.5f - mean_y;
+
+            cfg.sensor_offset_x = ox;
+            cfg.sensor_offset_y = oy;
+
+            printf(
+                "Auto offset: mean=(%.4f,%.4f) "
+                "offset=(%.4f,%.4f) samples=%d\n",
+                mean_x, mean_y, ox, oy, n);
+
+            DBG("auto offset: mean=(%.4f,%.4f) "
+                "offset_x=%.4f offset_y=%.4f n=%d\n",
+                mean_x, mean_y, ox, oy, n);
+        }
+        else
+        {
+            printf(
+                "Not enough warmup samples (%d), "
+                "using zero offset\n", n);
+
+            DBG("auto offset failed: n=%d\n", n);
+        }
+    }
+
+    valid = 0;
 
     printf(
         "Calibration starting\n");
@@ -732,8 +1076,6 @@ int main(int argc, char** argv)
         cfg.gaze_smooth,
         cfg.cursor_smooth,
         cfg.edge_zone);
-
-    sleep(1);
 
     for(int i=0;i<POINTS;i++)
     {
@@ -770,29 +1112,28 @@ int main(int argc, char** argv)
             targets[i][0], targets[i][1],
             px, py);
 
-        sleep(2);
+        sleep(1);
 
         valid = 0;
 
         usleep(300000);
 
-        float sx=0;
-        float sy=0;
+        float sx = 0.0f;
+        float sy = 0.0f;
+        int sx_count = 0;
 
-        int success=0;
+        int success = 0;
 
         for(int retry=0;
             retry<MAX_RETRIES;
             retry++)
         {
-            sx=0.0f;
-            sy=0.0f;
-
             int count=0;
             int loops=0;
+            float rx=0.0f, ry=0.0f;
 
             while(count < SAMPLE_COUNT &&
-                  loops < SAMPLE_COUNT*12)
+                  loops < LOOP_LIMIT)
             {
                 valid = 0;
 
@@ -835,8 +1176,8 @@ int main(int argc, char** argv)
 
                 if(valid)
                 {
-                    sx += gx;
-                    sy += gy;
+                    rx += gx;
+                    ry += gy;
 
                     count++;
 
@@ -859,6 +1200,19 @@ int main(int argc, char** argv)
 
                         fflush(stdout);
                     }
+
+                    /*
+                        if no samples at all after 500 loops
+                        (~1s) abort this retry early
+                    */
+
+                    if(loops == 500 && count == 0)
+                    {
+                        printf(
+                            "\nNo gaze received, skipping retry\n");
+
+                        break;
+                    }
                 }
 
                 loops++;
@@ -868,13 +1222,21 @@ int main(int argc, char** argv)
 
             printf("\n");
 
+            /*
+                accumulate into global sx/sy across retries
+            */
+
+            sx += rx;
+            sy += ry;
+            sx_count += count;
+
             if(count >= MIN_VALID_SAMPLES)
             {
                 p[i/3][i%3].raw_x =
-                    sx / count;
+                    rx / count;
 
                 p[i/3][i%3].raw_y =
-                    sy / count;
+                    ry / count;
 
                 success=1;
 
@@ -903,12 +1265,53 @@ int main(int argc, char** argv)
             sleep(1);
         }
 
-        if(!success)
+        if(!success && sx_count == 0 && i == 0)
         {
-            printf(
-                "Calibration failed\n");
+            fprintf(
+                stderr,
+                "No gaze data received at all. "
+                "Check tracker connection and position.\n");
 
             return 1;
+        }
+
+        if(!success)
+        {
+            /*
+                use best available samples if any were collected
+                across all retries — better than aborting
+            */
+
+            if(sx != 0.0f || sy != 0.0f)
+            {
+                p[i/3][i%3].raw_x = sx / (sx_count > 0 ? sx_count : 1);
+                p[i/3][i%3].raw_y = sy / (sx_count > 0 ? sx_count : 1);
+
+                fprintf(
+                    stderr,
+                    "[WARN] point %d: only %d samples, "
+                    "using best-effort average\n",
+                    i+1, sx_count);
+
+                DBG("point %d best-effort: raw=(%.6f,%.6f) samples=%d\n",
+                    i+1,
+                    p[i/3][i%3].raw_x,
+                    p[i/3][i%3].raw_y,
+                    sx_count);
+            }
+            else
+            {
+                p[i/3][i%3].raw_x = p[i/3][i%3].target_x;
+                p[i/3][i%3].raw_y = p[i/3][i%3].target_y;
+
+                fprintf(
+                    stderr,
+                    "[WARN] point %d: no samples collected, "
+                    "using target as fallback\n",
+                    i+1);
+
+                DBG("point %d fallback to target\n", i+1);
+            }
         }
 
         draw_target(
