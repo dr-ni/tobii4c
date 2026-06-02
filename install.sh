@@ -17,3 +17,21 @@ sudo cp ./tobii.conf /etc/ld.so.conf.d/
 sudo mkdir /usr/include/tobii
 sudo cp -R lib/include/tobii/* /usr/include/tobii
 sudo cp ./tobii.conf /etc/ld.so.conf.d/
+sudo ldconfig
+
+# tobii_engine requires libsqlcipher.so.0
+# create symlink if not already present
+if [ ! -f /usr/lib/x86_64-linux-gnu/libsqlcipher.so.0 ]; then
+    if [ -f /usr/lib/x86_64-linux-gnu/libsqlcipher.so.2 ]; then
+        sudo ln -s /usr/lib/x86_64-linux-gnu/libsqlcipher.so.2 \
+                   /usr/lib/x86_64-linux-gnu/libsqlcipher.so.0
+        echo "Created libsqlcipher.so.0 symlink"
+    else
+        echo "WARNING: libsqlcipher not found"
+        echo "Run: sudo apt install sqlcipher"
+        echo "Then retry: sudo ln -s /usr/lib/x86_64-linux-gnu/libsqlcipher.so.2 /usr/lib/x86_64-linux-gnu/libsqlcipher.so.0"
+    fi
+fi
+
+sudo systemctl restart tobii_engine.service
+echo "Install complete"
