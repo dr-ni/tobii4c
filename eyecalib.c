@@ -208,11 +208,20 @@ int import_tobii_db()
         return 0;
     }
 
+    /*
+        collect all matching profiles first
+    */
+
+#define MAX_PROFILES 16
+
+    char profiles[MAX_PROFILES][8192];
+    char profile_names[MAX_PROFILES][64];
+    int  profile_count = 0;
+
     char line[8192];
 
-    int found=0;
-
-    while(fgets(line,sizeof(line),f))
+    while(fgets(line,sizeof(line),f) &&
+          profile_count < MAX_PROFILES)
     {
         if(!(strstr(line,"\"IS4_Large_Peripheral\"") &&
              strstr(line,"\"readonly\":false")))
@@ -220,139 +229,232 @@ int import_tobii_db()
             continue;
         }
 
-        DBG("import_tobii_db: matched profile line (len=%zu)\n", strlen(line));
+        memcpy(
+            profiles[profile_count],
+            line,
+            sizeof(profiles[0])-1);
 
-        printf(
-            "\n[DB ACTIVE PROFILE]\n%s\n",
-            line);
+        profiles[profile_count][sizeof(profiles[0])-1] = 0;
 
-        found=1;
+        /*
+            extract name for display
+        */
 
-        if(strstr(line,"\"trackerPlacement\":\"under\""))
+        char* np = strstr(line,"\"name\":\"");
+        if(np)
         {
-            printf(
-                "[DB] tracker placement: UNDER\n");
-
-            cfg.sensor_offset_y =
-                -0.004f;
-
-            DBG("import_tobii_db: sensor_offset_y set to %.4f (under placement)\n",
-                cfg.sensor_offset_y);
+            np += 8;
+            char* end = strchr(np,'"');
+            if(end)
+            {
+                int len = end - np;
+                if(len > 63) len = 63;
+                strncpy(profile_names[profile_count], np, len);
+                profile_names[profile_count][len] = 0;
+            }
+        }
+        else
+        {
+            snprintf(
+                profile_names[profile_count],
+                sizeof(profile_names[0]),
+                "Profile %d",
+                profile_count+1);
         }
 
-        char* a =
-            strstr(
-                line,
-                "\"tracker\":{\"angle\":");
+        DBG("import_tobii_db: found profile '%s'\n",
+            profile_names[profile_count]);
 
-        if(a)
-        {
-            float angle=0.0f;
-
-            sscanf(
-                a,
-                "\"tracker\":{\"angle\":%f",
-                &angle);
-
-            printf(
-                "[DB] tracker angle: %.2f deg\n",
-                angle);
-
-            cfg.screen_tilt =
-                angle;
-
-            DBG("import_tobii_db: screen_tilt=%.2f\n", cfg.screen_tilt);
-        }
-
-        char* w =
-            strstr(line,"\"width\":");
-
-        if(w)
-        {
-            float width_mm=0.0f;
-
-            sscanf(
-                w,
-                "\"width\":%f",
-                &width_mm);
-
-            printf(
-                "[DB] display width: %.2f mm\n",
-                width_mm);
-
-            DBG("import_tobii_db: display width=%.2f mm\n", width_mm);
-        }
-
-        char* h =
-            strstr(line,"\"height\":");
-
-        if(h)
-        {
-            float height_mm=0.0f;
-
-            sscanf(
-                h,
-                "\"height\":%f",
-                &height_mm);
-
-            printf(
-                "[DB] display height: %.2f mm\n",
-                height_mm);
-
-            DBG("import_tobii_db: display height=%.2f mm\n", height_mm);
-        }
-
-        float blx,bly,blz;
-        float tlx,tly,tlz;
-        float trx,try_,trz;
-
-        int matched =
-            sscanf(
-                line,
-                "%*[^[][%f,%f,%f],\"topLeft\":[%f,%f,%f],\"topRight\":[%f,%f,%f]",
-                &blx,&bly,&blz,
-                &tlx,&tly,&tlz,
-                &trx,&try_,&trz);
-
-        DBG("import_tobii_db: geometry sscanf matched=%d\n", matched);
-
-        if(matched == 9)
-        {
-            printf(
-                "[DB] physical geometry parsed\n");
-
-            printf(
-                "     bottomLeft : %.2f %.2f %.2f\n",
-                blx,bly,blz);
-
-            printf(
-                "     topLeft    : %.2f %.2f %.2f\n",
-                tlx,tly,tlz);
-
-            printf(
-                "     topRight   : %.2f %.2f %.2f\n",
-                trx,try_,trz);
-
-            float screen_skew =
-                (trz - blz);
-
-            printf(
-                "[DB] screen skew z: %.2f\n",
-                screen_skew);
-
-            cfg.sensor_offset_y =
-                -(screen_skew / 5000.0f);
-
-            printf(
-                "[DB] derived sensor_offset_y = %.5f\n",
-                cfg.sensor_offset_y);
-
-            DBG("import_tobii_db: screen_skew=%.2f sensor_offset_y=%.5f\n",
-                screen_skew, cfg.sensor_offset_y);
-        }
+        profile_count++;
     }
 
     fclose(f);
+
+    if(profile_count == 0)
+    {
+        printf(
+            "[DB] no matching local profile found\n");
+
+        DBG("import_tobii_db: no matching profile\n");
+
+        return 0;
+    }
+
+    /*
+        if multiple profiles found, ask user to choose
+    */
+
+    int selected = 0;
+
+    if(profile_count > 1)
+    {
+        printf(
+            "\n[DB] Multiple profiles found:\n");
+
+        for(int i=0; i<profile_count; i++)
+        {
+            printf(
+                "  %d) %s\n",
+                i+1,
+                profile_names[i]);
+        }
+
+        printf(
+            "Select profile [1-%d]: ",
+            profile_count);
+
+        fflush(stdout);
+
+        int choice = 0;
+        if(scanf("%d",&choice) == 1 &&
+           choice >= 1 &&
+           choice <= profile_count)
+        {
+            selected = choice - 1;
+        }
+        else
+        {
+            printf(
+                "Invalid choice, using first profile\n");
+
+            selected = 0;
+        }
+    }
+
+    strncpy(line, profiles[selected], sizeof(line)-1);
+    line[sizeof(line)-1] = 0;
+
+    int found = 1;
+
+    printf(
+        "\n[DB ACTIVE PROFILE] %s\n",
+        profile_names[selected]);
+
+    DBG("import_tobii_db: using profile '%s'\n",
+        profile_names[selected]);
+
+    if(strstr(line,"\"trackerPlacement\":\"under\""))
+    {
+        printf(
+            "[DB] tracker placement: UNDER\n");
+
+        cfg.sensor_offset_y =
+            -0.004f;
+
+        DBG("import_tobii_db: sensor_offset_y set to %.4f (under placement)\n",
+            cfg.sensor_offset_y);
+    }
+
+    char* a =
+        strstr(
+            line,
+            "\"tracker\":{\"angle\":");
+
+    if(a)
+    {
+        float angle=0.0f;
+
+        sscanf(
+            a,
+            "\"tracker\":{\"angle\":%f",
+            &angle);
+
+        printf(
+            "[DB] tracker angle: %.2f deg\n",
+            angle);
+
+        cfg.screen_tilt =
+            angle;
+
+        DBG("import_tobii_db: screen_tilt=%.2f\n", cfg.screen_tilt);
+    }
+
+    char* w =
+        strstr(line,"\"width\":");
+
+    if(w)
+    {
+        float width_mm=0.0f;
+
+        sscanf(
+            w,
+            "\"width\":%f",
+            &width_mm);
+
+        printf(
+            "[DB] display width: %.2f mm\n",
+            width_mm);
+
+        DBG("import_tobii_db: display width=%.2f mm\n", width_mm);
+    }
+
+    char* h =
+        strstr(line,"\"height\":");
+
+    if(h)
+    {
+        float height_mm=0.0f;
+
+        sscanf(
+            h,
+            "\"height\":%f",
+            &height_mm);
+
+        printf(
+            "[DB] display height: %.2f mm\n",
+            height_mm);
+
+        DBG("import_tobii_db: display height=%.2f mm\n", height_mm);
+    }
+
+    float blx,bly,blz;
+    float tlx,tly,tlz;
+    float trx,try_,trz;
+
+    int matched =
+        sscanf(
+            line,
+            "%*[^[][%f,%f,%f],\"topLeft\":[%f,%f,%f],\"topRight\":[%f,%f,%f]",
+            &blx,&bly,&blz,
+            &tlx,&tly,&tlz,
+            &trx,&try_,&trz);
+
+    DBG("import_tobii_db: geometry sscanf matched=%d\n", matched);
+
+    if(matched == 9)
+    {
+        printf(
+            "[DB] physical geometry parsed\n");
+
+        printf(
+            "     bottomLeft : %.2f %.2f %.2f\n",
+            blx,bly,blz);
+
+        printf(
+            "     topLeft    : %.2f %.2f %.2f\n",
+            tlx,tly,tlz);
+
+        printf(
+            "     topRight   : %.2f %.2f %.2f\n",
+            trx,try_,trz);
+
+        float screen_skew =
+            (trz - blz);
+
+        printf(
+            "[DB] screen skew z: %.2f\n",
+            screen_skew);
+
+        cfg.sensor_offset_y =
+            -(screen_skew / 5000.0f);
+
+        printf(
+            "[DB] derived sensor_offset_y = %.5f\n",
+            cfg.sensor_offset_y);
+
+        DBG("import_tobii_db: screen_skew=%.2f sensor_offset_y=%.5f\n",
+            screen_skew, cfg.sensor_offset_y);
+    }
 
     if(!found)
     {
