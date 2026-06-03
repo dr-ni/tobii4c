@@ -139,8 +139,17 @@ sudo make uninstall
 
 # Calibration
 
-`eyecalib` displays a fullscreen calibration overlay and collects
-gaze samples for 9 screen positions arranged in a 3x3 grid.
+`eyecalib` runs in two phases:
+
+**Phase 1 — Native Tobii calibration** via `tobii_calibration_*` API:
+Adapts the tracker firmware to the user's eyes so the Stream Engine
+delivers normalized [0..1] gaze coordinates. Without this step, raw
+gaze values can be far outside [0..1] and the mesh calibration cannot
+work correctly.
+
+**Phase 2 — Mesh calibration** (barycentric warp):
+Collects gaze samples at 9 screen positions and builds the correction
+mesh that maps raw gaze to accurate screen coordinates.
 
 Run:
 
@@ -170,7 +179,15 @@ eyecalib --debug --debuggaze 2>eyecalib.log
 The calibration process:
 
 ```text
-fullscreen targets
+Phase 1: Native Tobii calibration
+    -> tobii_calibration_start
+    -> tobii_calibration_collect_data_2d (9 points)
+    -> tobii_calibration_compute_and_apply
+    -> tobii_calibration_stop
+    -> tracker now delivers normalized [0..1] gaze
+
+Phase 2: Mesh calibration
+    -> fullscreen targets
     -> gaze sample collection (250 samples per point)
     -> invalid sample rejection
     -> gaze averaging
@@ -254,7 +271,8 @@ eyemouse [options] [config_file]
 | Option              | Description                                          |
 |---------------------|------------------------------------------------------|
 | `-h --help`         | Show command line help                               |
-| `--usegyro`         | Enable Quha gyroscopic fine correction               |
+| `--usegyro`         | Enable Quha gyro, grab Quha exclusively              |
+| `--leaveXgyro`      | Enable Quha gyro, leave Quha as X11 mouse            |
 | `--blink`           | Enable blink click                                   |
 | `--blink-left <ms>` | Left click threshold in ms (default: 80)             |
 | `--blink-right <ms>`| Right click threshold in ms (default: 300)           |
@@ -406,10 +424,16 @@ The Quha device is automatically detected via:
 /dev/input/by-id/
 ```
 
-The Quha is grabbed exclusively using `EVIOCGRAB` whenever `eyemouse`
-starts, regardless of whether `--usegyro` is used. This prevents X11
-from receiving raw Quha mouse events in parallel while eyemouse controls
-the cursor.
+When `--usegyro` is active, the Quha device is grabbed exclusively
+using `EVIOCGRAB`. This prevents X11 from receiving raw Quha mouse
+events in parallel while eyemouse controls the cursor.
+
+When `--leaveXgyro` is used instead, the Quha gyro input is read
+but the Quha is **not** grabbed — it continues to operate as a
+normal X11 mouse alongside the eyetracker.
+
+Without `--usegyro` or `--leaveXgyro`, the Quha is not touched
+and operates normally as an X11 mouse.
 
 If the exclusive grab fails, a warning is printed and eyemouse
 continues — but X11 may still receive Quha events simultaneously.
@@ -419,7 +443,7 @@ before exit, so the Quha resumes normal X11 mouse operation immediately.
 
 ## Gyro mode
 
-`eyemouse --usegyro` additionally reads Quha movement events and applies
+Both `--usegyro` and `--leaveXgyro` read Quha movement events and apply
 them as a relative offset on top of the Tobii gaze position. The offset
 decays exponentially (factor 0.92 per frame), so gaze remains the
 primary positioning input.

@@ -9,13 +9,24 @@ eyecalib \- Tobii Eye Tracker X11 gaze calibration tool
 
 .SH DESCRIPTION
 .B eyecalib
-provides fullscreen calibration for the Tobii Eye Tracker 4C
+performs a two-phase fullscreen calibration for the Tobii Eye Tracker 4C
 under Linux/X11.
 
-The utility collects gaze samples for a 3x3 calibration mesh
-used by:
+.SS Phase 1: Native Tobii calibration
 
-.B eyemouse
+Uses the
+.B tobii_calibration_*
+API to adapt the tracker firmware to the user's eyes.
+Without this step the Stream Engine delivers raw gaze coordinates
+that can be far outside the normalized [0..1] range, making the
+mesh calibration unreliable.
+
+.SS Phase 2: Mesh calibration
+
+Collects gaze samples at 9 screen positions and builds a barycentric
+warp mesh that maps raw gaze coordinates to accurate screen positions
+for use by
+.BR eyemouse .
 
 Calibration improves:
 

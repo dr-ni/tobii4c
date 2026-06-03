@@ -25,10 +25,7 @@ Barycentric triangle interpolation
 Light gaze smoothing
 
 .IP \(bu 4
-Exclusive Quha device grab via EVIOCGRAB (always active)
-
-.IP \(bu 4
-Optional Quha gyroscopic fine correction
+Optional Quha gyroscopic fine correction (with or without exclusive grab)
 
 .IP \(bu 4
 Automatic Quha device detection through
@@ -45,7 +42,15 @@ Show command line help.
 
 .TP
 .B --usegyro
-Enable Quha gyroscopic fine correction input.
+Enable Quha gyroscopic fine correction.
+The Quha device is grabbed exclusively via EVIOCGRAB so that
+X11 does not receive raw Quha mouse events in parallel.
+
+.TP
+.B --leaveXgyro
+Enable Quha gyroscopic fine correction without grabbing the device.
+The Quha continues to operate as a normal X11 mouse alongside
+the eyetracker cursor.
 
 .TP
 .B --debug
@@ -157,12 +162,17 @@ The Quha device is automatically detected through:
 /dev/input/by-id
 .EE
 
-The Quha device is grabbed exclusively using EVIOCGRAB whenever
-eyemouse starts, regardless of whether
+.TP
 .B --usegyro
-is active.
-This prevents X11 from receiving raw Quha mouse events in parallel
-while eyemouse controls the cursor.
+Reads Quha gyro events and grabs the device exclusively via EVIOCGRAB.
+X11 does not receive raw Quha mouse events while eyemouse runs.
+
+.TP
+.B --leaveXgyro
+Reads Quha gyro events without grabbing the device.
+The Quha continues to operate as a normal X11 mouse in parallel.
+
+Without either flag, the Quha is not touched.
 
 If the exclusive grab fails, a warning is printed and eyemouse
 continues running, but X11 may still receive Quha events simultaneously.
@@ -172,10 +182,12 @@ before exit, so the Quha resumes normal X11 mouse operation immediately.
 
 .SS Gyro mode
 
-When
+Both
 .B --usegyro
-is active, Quha movement events are additionally read and applied
-as a relative fine correction on top of the Tobii gaze position.
+and
+.B --leaveXgyro
+read Quha movement events and apply them as a relative fine correction
+on top of the Tobii gaze position.
 The offset decays exponentially (factor 0.92 per frame), so gaze
 remains the primary positioning input.
 
