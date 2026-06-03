@@ -117,6 +117,9 @@ float cy=0.0f;
 float gyro_dx=0.0f;
 float gyro_dy=0.0f;
 
+float sensor_offset_x=0.0f;
+float sensor_offset_y=0.0f;
+
 int screen_w=0;
 int screen_h=0;
 
@@ -125,6 +128,7 @@ int screen_h=0;
 */
 
 static volatile int quha_fd = -1;
+static volatile int quha_grabbed = 0;
 
 static void signal_handler(int sig)
 {
@@ -132,17 +136,14 @@ static void signal_handler(int sig)
 
     if(quha_fd >= 0)
     {
-        /*
-            release exclusive grab so X11
-            receives Quha events again
-        */
+        if(quha_grabbed)
+        {
+            ioctl(quha_fd,EVIOCGRAB,0);
+            printf("\nQuha released\n");
+        }
 
-        ioctl(quha_fd,EVIOCGRAB,0);
         close(quha_fd);
         quha_fd = -1;
-
-        printf(
-            "\nQuha released\n");
     }
 
     _exit(0);
@@ -157,7 +158,8 @@ void print_help(const char* prog)
         "\n"
         "Options:\n"
         "  -h --help                show help\n"
-        "  --usegyro                use Quha gyro\n"
+        "  --usegyro                use Quha gyro (grabs Quha exclusively)\n"
+        "  --leaveXgyro             use Quha gyro but leave Quha as X11 mouse\n"
         "  --blink                  enable blink click\n"
         "  --blink-left  <ms>       left click threshold  (default: 80)\n"
         "  --blink-right <ms>       right click threshold (default: 300)\n"
@@ -202,6 +204,9 @@ int load_config(const char* path)
 
     int idx = 0;
 
+    float sensor_offset_x_local = 0.0f;
+    float sensor_offset_y_local = 0.0f;
+
     while(fgets(line,sizeof(line),f))
     {
         /*
@@ -220,6 +225,35 @@ int load_config(const char* path)
 
         if(line[0] == '\n')
             continue;
+
+        /*
+            key value parameters
+        */
+
+        char key[64];
+        float val;
+
+        if(sscanf(line, "%63s %f", key, &val) == 2 &&
+           !(key[0] >= '0' && key[0] <= '9') &&
+           key[0] != '-')
+        {
+            if(!strcmp(key, "sensor_offset_x"))
+            {
+                sensor_offset_x_local = val;
+                DBG("load_config: sensor_offset_x=%.6f\n", val);
+            }
+            else if(!strcmp(key, "sensor_offset_y"))
+            {
+                sensor_offset_y_local = val;
+                DBG("load_config: sensor_offset_y=%.6f\n", val);
+            }
+            else
+            {
+                DBG("load_config: skip key: %s = %.6f\n", key, val);
+            }
+
+            continue;
+        }
 
         float rx,ry,tx,ty;
 
@@ -275,9 +309,17 @@ int load_config(const char* path)
 
     fclose(f);
 
+    sensor_offset_x = sensor_offset_x_local;
+    sensor_offset_y = sensor_offset_y_local;
+
     printf(
         "Loaded %d calibration points\n",
         idx);
+
+    printf(
+        "Sensor offset: x=%.6f y=%.6f\n",
+        sensor_offset_x,
+        sensor_offset_y);
 
     DBG("load_config: total points loaded: %d\n", idx);
 
@@ -446,9 +488,9 @@ void warp(
     *oy = clampf(raw_y,0.0f,1.0f);
 }
 
-int open_quha_device(void)
+int open_quha_device(int grab)
 {
-    DBG("open_quha_device: scanning /dev/input/by-id\n");
+    DBG("open_quha_device: scanning /dev/input/by-id (grab=%d)\n", grab);
 
     DIR* dir =
         opendir("/dev/input/by-id");
@@ -520,28 +562,36 @@ int open_quha_device(void)
         {
             DBG("open_quha_device: fd=%d opened\n", fd);
 
-            /*
-                grab device exclusively so X11
-                never receives Quha mouse events
-                while eyemouse is running
-            */
-
-            if(ioctl(fd,EVIOCGRAB,1) < 0)
+            if(grab)
             {
-                perror("EVIOCGRAB");
-                fprintf(
-                    stderr,
-                    "Warning: could not grab Quha exclusively\n"
-                    "X11 may still receive mouse events\n");
+                /*
+                    grab device exclusively so X11
+                    does not receive Quha mouse events
+                */
 
-                DBG("open_quha_device: EVIOCGRAB failed, continuing without exclusive grab\n");
+                if(ioctl(fd,EVIOCGRAB,1) < 0)
+                {
+                    perror("EVIOCGRAB");
+                    fprintf(
+                        stderr,
+                        "Warning: could not grab Quha exclusively\n"
+                        "X11 may still receive mouse events\n");
+
+                    DBG("open_quha_device: EVIOCGRAB failed\n");
+                }
+                else
+                {
+                    printf(
+                        "Quha grabbed exclusively\n");
+
+                    quha_grabbed = 1;
+
+                    DBG("open_quha_device: EVIOCGRAB success\n");
+                }
             }
             else
             {
-                printf(
-                    "Quha grabbed exclusively\n");
-
-                DBG("open_quha_device: EVIOCGRAB success\n");
+                DBG("open_quha_device: grab skipped (--leaveXgyro)\n");
             }
 
             closedir(dir);
@@ -751,7 +801,9 @@ void gaze_cb(
         &gx,
         &gy);
 
-    DBGGAZE("warped=(%.4f,%.4f)\n", gx, gy);
+    DBGGAZE("raw=(%.4f,%.4f) warped=(%.4f,%.4f)\n",
+        g->position_xy[0], g->position_xy[1],
+        gx, gy);
 }
 
 void get_config_path(
@@ -771,6 +823,7 @@ void get_config_path(
 int main(int argc,char** argv)
 {
     int use_gyro = 0;
+    int leave_x_gyro = 0;
     char cfg[PATH_MAX];
 
     get_config_path(
@@ -789,6 +842,13 @@ int main(int argc,char** argv)
         if(!strcmp(argv[i],"--usegyro"))
         {
             use_gyro = 1;
+            continue;
+        }
+
+        if(!strcmp(argv[i],"--leaveXgyro"))
+        {
+            use_gyro = 1;
+            leave_x_gyro = 1;
             continue;
         }
 
@@ -854,6 +914,7 @@ int main(int argc,char** argv)
     DBG("eyemouse starting\n");
     DBG("config path: %s\n", cfg);
     DBG("use_gyro: %d\n", use_gyro);
+    DBG("leave_x_gyro: %d\n", leave_x_gyro);
     DBG("use_blink: %d\n", use_blink);
     DBG("debug_gaze: %d\n", debug_gaze);
     DBG("debug_gyro: %d\n", debug_gyro);
@@ -968,20 +1029,14 @@ int main(int argc,char** argv)
 
     DBG("tobii_gaze_point_subscribe: %d\n", err);
 
-    /*
-        always grab Quha to prevent X11 from
-        receiving raw mouse events while eyemouse
-        controls the cursor
-    */
-
     signal(SIGTERM, signal_handler);
     signal(SIGINT,  signal_handler);
     signal(SIGHUP,  signal_handler);
 
-    quha_fd = open_quha_device();
-
     if(use_gyro)
     {
+        quha_fd = open_quha_device(!leave_x_gyro);
+
         if(quha_fd >= 0)
         {
             pthread_t gt;
@@ -992,8 +1047,16 @@ int main(int argc,char** argv)
                 gyro_thread,
                 NULL);
 
-            printf(
-                "Gyro enabled\n");
+            if(leave_x_gyro)
+            {
+                printf(
+                    "Gyro enabled (Quha left as X11 mouse)\n");
+            }
+            else
+            {
+                printf(
+                    "Gyro enabled (Quha grabbed exclusively)\n");
+            }
         }
         else
         {
@@ -1003,6 +1066,7 @@ int main(int argc,char** argv)
     }
     else
     {
+        DBG("Quha grab skipped (--usegyro not set)\n");
         printf(
             "Gyro disabled\n");
     }

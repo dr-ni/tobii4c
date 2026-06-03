@@ -1057,26 +1057,63 @@ int main(int argc, char** argv)
 
     /*
         quick stream test - check if tracker delivers any data
+        retry with tobii_engine restart if no data received
     */
 
     printf("Testing gaze stream...\n");
 
     {
-        int test_loops = 0;
         int test_valid = 0;
 
-        while(test_loops < 200 && test_valid < 3)
+        for(int attempt = 0; attempt < 2; attempt++)
         {
-            valid = 0;
+            int test_loops = 0;
+            test_valid = 0;
 
-            tobii_wait_for_callbacks(1, &dev);
-            tobii_device_process_callbacks(dev);
+            while(test_loops < 1000 && test_valid < 3)
+            {
+                valid = 0;
 
-            if(valid)
-                test_valid++;
+                tobii_wait_for_callbacks(1, &dev);
+                tobii_device_process_callbacks(dev);
 
-            test_loops++;
-            usleep(5000);
+                if(valid)
+                    test_valid++;
+
+                test_loops++;
+                usleep(5000);
+            }
+
+            DBG("stream test attempt %d: valid=%d loops=%d\n",
+                attempt+1, test_valid, test_loops);
+
+            if(test_valid > 0)
+                break;
+
+            if(attempt == 0)
+            {
+                /*
+                    no data — restart tobii_engine and retry
+                */
+
+                printf(
+                    "No gaze data, restarting tobii_engine...\n");
+
+                tobii_gaze_point_unsubscribe(dev);
+                tobii_device_destroy(dev);
+                tobii_api_destroy(api);
+
+                system("sudo systemctl restart tobii_engine");
+
+                sleep(3);
+
+                tobii_api_create(&api, NULL, NULL);
+                tobii_enumerate_local_device_urls(api, url_cb, url);
+                tobii_device_create(api, url, &dev);
+                tobii_gaze_point_subscribe(dev, gaze_cb, NULL);
+
+                printf("Retrying gaze stream...\n");
+            }
         }
 
         if(test_valid == 0)
@@ -1090,80 +1127,9 @@ int main(int argc, char** argv)
             return 1;
         }
 
-        printf("Gaze stream ok (%d samples in %d loops)\n",
-            test_valid, test_loops);
+        printf("Gaze stream ok\n");
 
-        DBG("stream test: valid=%d loops=%d\n", test_valid, test_loops);
-    }
-
-    /*
-        estimate sensor offset from warmup samples
-        to compensate for non-standard tracker mounting
-    */
-
-    printf(
-        "Estimating sensor offset...\n"
-        "Please look at the CENTER of the screen.\n");
-
-    sleep(1);
-
-    {
-        float sum_x = 0.0f;
-        float sum_y = 0.0f;
-        int   n     = 0;
-        int   loops = 0;
-
-        while(n < 60 && loops < 1500)
-        {
-            valid = 0;
-
-            tobii_wait_for_callbacks(1, &dev);
-            tobii_device_process_callbacks(dev);
-
-            if(valid)
-            {
-                sum_x += gx;
-                sum_y += gy;
-                n++;
-            }
-
-            loops++;
-            usleep(2000);
-        }
-
-        if(n > 10)
-        {
-            float mean_x = sum_x / n;
-            float mean_y = sum_y / n;
-
-            /*
-                center of screen should be (0.5, 0.5)
-                derive offset to shift mean to center
-            */
-
-            float ox = 0.5f - mean_x;
-            float oy = 0.5f - mean_y;
-
-            cfg.sensor_offset_x = ox;
-            cfg.sensor_offset_y = oy;
-
-            printf(
-                "Auto offset: mean=(%.4f,%.4f) "
-                "offset=(%.4f,%.4f) samples=%d\n",
-                mean_x, mean_y, ox, oy, n);
-
-            DBG("auto offset: mean=(%.4f,%.4f) "
-                "offset_x=%.4f offset_y=%.4f n=%d\n",
-                mean_x, mean_y, ox, oy, n);
-        }
-        else
-        {
-            printf(
-                "Not enough warmup samples (%d), "
-                "using zero offset\n", n);
-
-            DBG("auto offset failed: n=%d\n", n);
-        }
+        DBG("stream test ok: valid=%d\n", test_valid);
     }
 
     valid = 0;
